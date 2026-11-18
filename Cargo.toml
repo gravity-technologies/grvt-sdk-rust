@@ -1,0 +1,61 @@
+[package]
+name = "grvt"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "Grvt SDK (preview): REST, WebSocket streams, WebSocket order entry, EIP-712 signing"
+license = "MIT"
+publish = false
+# An explicit list, because src/generated and CHANGELOG.md are git-ignored build output (`make sdk-gen`) and
+# cargo leaves git-ignored files out otherwise. Tests and benches read the shared contract and scenarios, outside
+# the crate (tests/shared), so they stay out.
+include = ["src/**/*.rs", "examples/**/*.rs", "Cargo.toml", "README.md", "RUNTIME_API.md", "CHANGELOG.md", "LICENSE"]
+
+[features]
+default = ["client"]
+# The async client (`Grvt`): tokio, reqwest, tokio-tungstenite and everything that does I/O. Without it the
+# crate is the no-I/O core: models, signing, request building, reply and frame parsing, session state,
+# sequencing, order books and recovery steps.
+client = ["dep:tokio", "dep:reqwest", "dep:tokio-tungstenite", "dep:futures", "dep:bytes", "dep:tracing-subscriber"]
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0.145", features = ["raw_value"] }
+rust_decimal = "1.39"
+# 0.31, not 0.33: 0.33 re-randomizes its global context on every signature, which doubles the cost of a
+# signature (measured 11.9 -> 23.5 µs in benches/hot_path.rs). The signer here blinds its own context once.
+secp256k1 = { version = "0.31", features = ["recovery"] }
+sha3 = "0.12"
+thiserror = "2"
+tracing = "0.1.41"
+rand = "0.10"
+
+tokio = { version = "1.48", features = ["rt", "rt-multi-thread", "macros", "net", "time", "sync"], optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["rustls"], optional = true }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"], optional = true }
+futures = { version = "0.3.31", optional = true }
+bytes = { version = "1.10", optional = true }
+tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"], optional = true }
+
+[dev-dependencies]
+k256 = { version = "0.14", features = ["ecdsa"] }
+tiny-keccak = { version = "2", features = ["keccak"] }
+
+[[example]]
+name = "quickstart"
+required-features = ["client"]
+
+# Runs each shared scenario as its own test, with its own main (tests/scenarios.rs).
+[[test]]
+name = "scenarios"
+harness = false
+required-features = ["client"]
+
+[[bench]]
+name = "hot_path"
+harness = false
+required-features = ["client"]
+
+[[bench]]
+name = "lite"
+harness = false
