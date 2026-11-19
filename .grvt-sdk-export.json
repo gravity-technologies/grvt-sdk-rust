@@ -1,6 +1,7 @@
 [
   ".gitignore",
   "CHANGELOG.md",
+  "CONTRIBUTING.md",
   "Cargo.lock",
   "Cargo.toml",
   "LICENSE",
