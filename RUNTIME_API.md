@@ -10,7 +10,7 @@ Two layers. The core (always built, no I/O) holds models, enums, errors, specs, 
 `#[cfg(feature = "client")]`. Generated core code must not name anything from the client
 (`Runtime`, `RpcCall`, `StreamCall`, futures, tokio).
 
-The generator is `sdk/generator/rust` (`go run ./sdk/generator rust`, or `make sdk-gen` for everything). Its
+The generator is `sdk/generator/rust` (`make sdk-gen-rust`, or `make sdk-gen-code` for every SDK and the docs). Its
 output in `src/generated/` (not committed) is the reference for everything below. Naming and write rules shared
 with the other generators live in `sdk/generator/naming`.
 
@@ -118,8 +118,8 @@ names must not clash with those methods (the generator fails if they do). String
 `RpcCall` checks that each required setter ran before calling the runtime. `with_request` supplies a complete model.
 `Runtime::call(spec, req, sign, timeout)` does, in order: `prepare_request` (default account,
 `missing_field` check, `fill_client_order_ids`) -> `before_send` hook (only if set: request -> JSON ->
-request) -> `Runtime::sign` -> encode (full JSON for the client order ids and stale instruments; the
-wire body in the client's encoding) -> REST (`rest_request_body`, `rest_response_body`) or WS
+request; adding, removing or reordering orders, or changing their client order IDs, is an `Error::Config` and nothing is sent) ->
+`Runtime::sign` -> encode (full JSON for the stale instruments; the wire body in the client's encoding) -> REST (`rest_request_body`, `rest_response_body`) or WS
 (`jsonrpc_frame`, `parse_ws_message`, `ws_result`) -> `decode_response`. Each of those is an
 `Encoding` method; `RpcSpec::encoding(e)` and `path_for(e)` keep edge routes full.
 
@@ -318,7 +318,7 @@ static METADATA: MetadataLoaders = MetadataLoaders { instrument: load_instrument
 `Config` (builder): `env`, `api_key`, `signer`, `order_transport` (`Rest` | `Ws`), `encoding` (`Lite` by
 default | `Full`; lite WS URLs are the env's with `specs::FULL_WS_PATH` swapped for `specs::LITE_WS_PATH`), `check_orders`, `clock`,
 `nonces`, `client_order_ids`, `http` (HTTP plug-in), `before_send`, `on_event`, `call_timeout`, `http_attempt_timeout`,
-`ws_request_timeout`, `resync_timeout`, `queue_size`.
+`ws_request_timeout`, `resync_timeout`, `idle_timeout`, `queue_size`.
 
 ## Call deadlines
 
@@ -326,13 +326,14 @@ default | `Full`; lite WS URLs are the env's with `specs::FULL_WS_PATH` swapped 
 retry delays and the reply. `RpcCall::timeout` overrides that total for one call.
 `Config::http_attempt_timeout` limits each HTTP attempt, including login, and
 `ws_request_timeout` caps a WS reply or subscribe. Defaults come from
-`src/generated/behavior.rs` (built from `contract/behavior.json`). Durations must be positive.
+`src/generated/behavior.rs` (built from `contract/behavior.json`). Durations must be positive, and
+`idle_timeout` at least `WATCHDOG_INTERVAL`.
 
-Applications that supply their own transport pass the final request IDs to `rest_response` or `ws_response`
+Applications that supply their own transport pass the request's client order IDs (what `prepare_request` returns) to `rest_response` or `ws_response`
 (an empty slice for reads and writes that create no orders), so an unknown outcome carries them.
 
 A returned deadline error is unsent during preparation. After dispatch may have
-started, a write returns `OrderStateUnknown` with its final submitted IDs and the
+started, a write returns `OrderStateUnknown` with its client order IDs and the
 original transport error as its source. Dropping a Rust future cannot return an
 error: reconcile a write if dispatch may already have started. Dropping the call
 removes its pending WS entry and prevents a queued frame from starting; it never
@@ -350,10 +351,8 @@ started remains uncertain.
 
 ## HTTP redirects and retries
 
-The SDK does not follow HTTP redirects for API requests.
-A redirect on a write returns an uncertain outcome instead of sending the signed request to another endpoint.
-The default transports also avoid retries after an uncertain write failure.
-Custom HTTP transports must preserve these rules.
+The SDK never follows a redirect or retries a write, and a custom HTTP transport must not either: the rule and
+why are in [What the SDK retries](https://developers.grvt.io/guides/errors-and-retries#what-the-sdk-retries).
 
 Use `ReqwestTransport::with_builder` to configure a reqwest transport.
 It disables redirect following and reqwest protocol retries after applying the supplied builder settings.

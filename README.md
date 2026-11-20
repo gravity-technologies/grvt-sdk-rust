@@ -8,7 +8,7 @@ crate, two layers:
   their own sockets, threads and event loop (mio, io_uring, busy-poll).
 - **Client** (feature `client`, on by default): `Grvt`, an async tokio client built on the core.
 
-> **Preview:** 0.x releases can change the API. Pin an exact version.
+> **Preview.** Any 0.x release can change the API. Pin an exact version.
 
 ## Install
 
@@ -64,8 +64,7 @@ Runnable examples: [`examples/quickstart.rs`](examples/quickstart.rs) (client) a
 - TLS is rustls on aws-lc-rs, with the OS trust store. No feature switches it to ring. aws-lc-sys needs a C
   compiler to build, and cmake for some cross targets.
 - The client runs on tokio's multi-thread or current_thread runtime; the crate's client tests run on
-  current_thread. Each subscription queues up to 4096 frames (`.queue_size(n)` on the `Config`,
-  `.with_queue_size(n)` on one stream).
+  current_thread. Each subscription has a bounded queue (`.queue_size(n)` on the `Config`).
 - Core parsing borrows: `parse_ws_message` returns a `WsMessage` that points into your buffer, and
   `ws_request_into` / `encode_request_into` write into a `Vec` you keep. Decoding a payload builds owned models.
 
@@ -85,10 +84,7 @@ checkout. Details: [CONTRIBUTING.md](CONTRIBUTING.md#benchmarks).
 
 ## Known limitations
 
-- No blocking client: call it from async code, or use the core.
-- Private streams can't resume from a sequence number; fill missed events from REST history.
-- Wallet session login isn't supported; log in with an API key (`Config::api_key`).
-- Algo orders and session keys can't be signed yet.
+See [Not supported yet](https://developers.grvt.io/sdks/rust#not-supported-yet) on the Rust SDK page.
 
 ## Contributing
 

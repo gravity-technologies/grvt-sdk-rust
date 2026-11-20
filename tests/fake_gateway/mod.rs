@@ -3,7 +3,8 @@
 //! - subscribe -> ack (latest_sequence_number = last pushed, num_snapshots 1) then one snapshot frame
 //! - unsubscribe -> ack
 //! - any other method -> `{"result": {}}` unless the method is in `ignore_rpcs`
-//! - `push` sends a delta to every connection; `drop_all` closes every connection
+//! - `push` sends a delta to every connection; `drop_all` closes every connection; `silence_all` keeps
+//!   every connection open but makes it send nothing more, not even a pong
 //! - a connection on `/ws/lite` speaks lite: incoming frames are renamed back to full names with the
 //!   contract's lite names (a key that is not a lite name of its type is recorded in `lite_errors`), outgoing
 //!   ones renamed to lite. `received` always holds full names; `received_lite` the frames as sent.
@@ -31,6 +32,8 @@ use crate::lite_names::LiteNames;
 enum Cmd {
     Send(String),
     Close(u16),
+    /// Keep the connection open but send nothing more: no frames, replies or pongs.
+    Silence,
 }
 
 #[derive(Default)]
@@ -135,6 +138,14 @@ impl FakeGateway {
         });
     }
 
+    pub fn silence_all(&self) {
+        self.with(|s| {
+            for c in s.conns.drain(..) {
+                let _ = c.send(Cmd::Silence);
+            }
+        });
+    }
+
     pub fn drop_all(&self) {
         self.with(|s| {
             for c in s.conns.drain(..) {
@@ -204,6 +215,12 @@ async fn serve(tcp: tokio::net::TcpStream, st: Arc<Mutex<State>>) {
                 Some(Cmd::Close(code)) => {
                     let _ = sink.send(Message::Close(Some(CloseFrame { code: CloseCode::from(code), reason: "bye".into() }))).await;
                     tokio::time::sleep(Duration::from_millis(10)).await;
+                    return;
+                }
+                Some(Cmd::Silence) => {
+                    // tungstenite answers a ping only while the stream is read, so not reading is silence.
+                    // The client drops the connection long before this ends.
+                    tokio::time::sleep(Duration::from_secs(60)).await;
                     return;
                 }
                 None => return,

@@ -42,15 +42,14 @@ use super::log::{debug_enabled, redact};
 use super::protocol::{Backoff, Pending, RequestTable, Sequencer, Verdict};
 use super::request::{decode_frame_as, ws_result, MessageKind, SubscribeAck, WsMessage};
 use super::spec::{FeedFrame, StreamSpec};
+use crate::generated::behavior;
 
-pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-/// Client ping interval. The server pings every 5s too.
-pub const HEARTBEAT: Duration = Duration::from_secs(10);
-/// No frame at all for this long: the connection is dead.
-pub const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_INCOMING: usize = 64 << 20;
-/// A connection that stayed up this long resets the reconnect backoff.
-const STABLE_AFTER: Duration = Duration::from_secs(10);
+pub const CONNECT_TIMEOUT: Duration = behavior::WS_CONNECT_TIMEOUT;
+/// The default idle timeout: no frame at all, not even a ping or pong, for this long means the connection
+/// is dead.
+pub const IDLE_TIMEOUT: Duration = behavior::WS_IDLE_TIMEOUT;
+/// Client ping interval with the default idle timeout: a third of it.
+pub const HEARTBEAT: Duration = Duration::from_millis(IDLE_TIMEOUT.as_millis() as u64 / 3);
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -128,6 +127,7 @@ struct Shared {
     max_frame_bytes: Option<usize>,
     request_timeout: Duration,
     resync_timeout_ms: AtomicU64,
+    idle_timeout: Duration,
     encoding: Encoding,
     state: Mutex<State>,
     out_tx: mpsc::UnboundedSender<Out>,
@@ -153,6 +153,8 @@ pub struct WsOptions {
     pub max_frame_bytes: Option<usize>,
     pub request_timeout: Duration,
     pub resync_timeout: Duration,
+    /// No frame at all for this long: drop the connection and reconnect. Pings go out every third of it.
+    pub idle_timeout: Duration,
     /// Field names of every frame on this socket; `url` must serve that encoding.
     pub encoding: Encoding,
 }
@@ -176,6 +178,7 @@ impl WsSocket {
                 max_frame_bytes: opts.max_frame_bytes,
                 request_timeout: opts.request_timeout,
                 resync_timeout_ms: AtomicU64::new(opts.resync_timeout.as_millis() as u64),
+                idle_timeout: opts.idle_timeout,
                 encoding: opts.encoding,
                 state: Mutex::default(),
                 out_tx,
@@ -304,7 +307,7 @@ impl WsSocket {
             id: sh.next_sub_id.fetch_add(1, Ordering::Relaxed),
             spec,
             selector,
-            capacity: capacity.max(1),
+            capacity,
             inner: Mutex::default(),
         });
         let subscription = Subscription {
@@ -489,8 +492,8 @@ impl Shared {
             lock(&self.state).session_gen = s.generation();
         }
         let cfg = WebSocketConfig::default()
-            .max_message_size(Some(MAX_INCOMING))
-            .max_frame_size(Some(MAX_INCOMING));
+            .max_message_size(Some(behavior::WS_MAX_INCOMING_FRAME))
+            .max_frame_size(Some(behavior::WS_MAX_INCOMING_FRAME));
         match tokio::time::timeout(
             CONNECT_TIMEOUT,
             tokio_tungstenite::connect_async_with_config(req, Some(cfg), true),
@@ -814,7 +817,7 @@ async fn supervise(sh: Arc<Shared>, mut out_rx: mpsc::UnboundedReceiver<Out>) {
 
         let up_since = Instant::now();
         let (code, reason) = run(&sh, ws, &mut out_rx, epoch).await;
-        if up_since.elapsed() > STABLE_AFTER {
+        if up_since.elapsed() > behavior::RECONNECT_BACKOFF_RESET_AFTER {
             backoff.reset();
         }
 
@@ -895,8 +898,8 @@ async fn run(
     epoch: u64,
 ) -> (Option<u16>, String) {
     let (mut sink, mut stream) = ws.split();
-    let mut tick = tokio::time::interval(Duration::from_millis(500));
-    let mut ping = tokio::time::interval(HEARTBEAT);
+    let mut tick = tokio::time::interval(behavior::WATCHDOG_INTERVAL);
+    let mut ping = tokio::time::interval(sh.idle_timeout / 3);
     ping.tick().await;
     let mut last_rx = Instant::now();
     loop {
@@ -946,8 +949,8 @@ async fn run(
                     let _ = sink.close().await;
                     return (None, reason);
                 }
-                if last_rx.elapsed() > IDLE_TIMEOUT {
-                    return (None, format!("no frames for {IDLE_TIMEOUT:?}"));
+                if last_rx.elapsed() > sh.idle_timeout {
+                    return (None, format!("no frames for {:?}", sh.idle_timeout));
                 }
             }
             _ = ping.tick() => {
@@ -1154,6 +1157,7 @@ mod tests {
                     max_frame_bytes: None,
                     request_timeout: Duration::from_secs(5),
                     resync_timeout: Duration::from_secs(5),
+                    idle_timeout: IDLE_TIMEOUT,
                     encoding: Encoding::Full,
                 },
             );

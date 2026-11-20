@@ -26,55 +26,23 @@ use serde_json::{json, Value};
 
 const TEST_KEY: &str = "0xbfe25ff07bd38cb3fbc28a2a296d41aabd68a78c929d257935906489fc9c6d89";
 
-/// Replaces every "$key", "$key.index", "$key*n" and "$key+n" string with the value from behavior.json.
-fn resolve(v: Value, behavior: &Value) -> Value {
-    match v {
-        Value::Array(a) => Value::Array(a.into_iter().map(|e| resolve(e, behavior)).collect()),
-        Value::Object(o) => Value::Object(o.into_iter().map(|(k, e)| (k, resolve(e, behavior))).collect()),
-        Value::String(s) if s.starts_with('$') => {
-            let body = &s[1..];
-            let (name, add) = match body.find(['+', '-']) {
-                Some(i) => (&body[..i], body[i..].parse::<f64>().unwrap()),
-                None => (body, 0.0),
-            };
-            let (name, times) = match name.split_once('*') {
-                Some((k, n)) => (k, Some(n.parse::<f64>().unwrap())),
-                None => (name, None),
-            };
-            let (key, index) = match name.split_once('.') {
-                Some((k, i)) => (k, Some(i.parse::<usize>().unwrap())),
-                None => (name, None),
-            };
-            let mut value = behavior[key]["value"].clone();
-            assert!(!value.is_null(), "unknown behavior key {key}");
-            if let Some(i) = index {
-                value = value[i].clone();
-            }
-            if let Some(n) = times {
-                value = json!(value.as_f64().unwrap() * n);
-            }
-            if add != 0.0 {
-                value = match value.as_i64() {
-                    Some(i) => json!(i + add as i64),
-                    None => json!(value.as_f64().unwrap() + add),
-                };
-            }
-            value
-        }
-        other => other,
-    }
-}
-
-fn behavior() -> Value {
-    shared::load("contract/behavior.json")
-}
-
+/// runtime.json with its behavior.json references already replaced by their values (sdk/generator/scenarios).
 fn scenarios() -> Vec<Value> {
-    let raw = shared::load("scenarios/runtime.json");
-    match resolve(raw, &behavior()) {
+    match shared::load("scenarios/runtime.resolved.json") {
         Value::Array(a) => a,
-        _ => panic!("runtime.json is a list"),
+        _ => panic!("runtime.resolved.json is a list"),
     }
+}
+
+/// `SessionRotated` -> `session_rotated`, the kind's name in behavior.json.
+fn snake(name: &str) -> String {
+    name.chars()
+        .enumerate()
+        .flat_map(|(i, c)| {
+            let sep = (i > 0 && c.is_uppercase()).then_some('_');
+            sep.into_iter().chain(c.to_lowercase())
+        })
+        .collect()
 }
 
 /// The scripted replies in order; the last one repeats.
@@ -148,14 +116,16 @@ fn http_reply(r: &Value) -> grvt::Result<HttpResponse> {
     })
 }
 
-fn order(client_order_id: Option<u64>) -> m::OrderInput {
+/// An order at 65000.1, or off the 0.1 tick at 65000.15.
+fn order(client_order_id: Option<u64>, off_tick: bool) -> m::OrderInput {
+    let price = if off_tick { "65000.15" } else { "65000.1" };
     let o = m::OrderInput::default()
         .with_sub_account_id(8289849667772468)
         .with_time_in_force(enums::TimeInForce::GoodTillTime)
         .with_legs(vec![m::OrderLeg::default()
             .with_instrument("BTC_USDT_Perp")
             .with_size(rust_decimal::Decimal::from_str_exact("0.01").unwrap())
-            .with_limit_price(rust_decimal::Decimal::from_str_exact("65000.1").unwrap())
+            .with_limit_price(rust_decimal::Decimal::from_str_exact(price).unwrap())
             .with_is_buying_asset(true)]);
     match client_order_id {
         Some(id) => o.with_metadata(m::OrderMetadataInput::default().with_client_order_id(id)),
@@ -163,7 +133,9 @@ fn order(client_order_id: Option<u64>) -> m::OrderInput {
     }
 }
 
-fn outcome(result: &grvt::Result<()>) -> &'static str {
+/// The scenario outcome of a result. Rust has one `Error::Config` for bad input and a missing setting: the
+/// countdown's bounds check is the scenarios' validation_error, anything else a config_error.
+fn outcome(result: &grvt::Result<()>, kind: &str) -> &'static str {
     match result {
         Ok(()) => "ok",
         Err(Error::OrderStateUnknown { .. }) => "order_state_unknown",
@@ -171,7 +143,9 @@ fn outcome(result: &grvt::Result<()>) -> &'static str {
         Err(Error::RateLimit { .. }) => "rate_limited",
         Err(Error::Api { .. }) => "api_error",
         Err(Error::Transport { .. }) => "transport_error",
-        Err(Error::Config(_)) => "validation_error",
+        Err(Error::Config(_)) if kind == "countdown" => "validation_error",
+        Err(Error::Config(_)) => "config_error",
+        Err(Error::OrderOutOfBounds(_)) => "order_out_of_bounds",
         Err(_) => "unexpected",
     }
 }
@@ -185,12 +159,15 @@ async fn run_call(sc: &Value, encoding: Encoding) {
         ..Default::default()
     }));
     let lite = encoding == Encoding::Lite;
-    let route = match call["kind"].as_str().unwrap() {
-        "read" => "ticker",
-        "write" => "create_order",
-        _ => "cancel_on_disconnect",
+    let bulk = call["bulk"] == true;
+    // The RPC the script answers: its WebSocket method, and its REST path after /full or /lite.
+    let method = match call["kind"].as_str().unwrap() {
+        "read" => "v1/ticker",
+        "write" if bulk => "v2/bulk_orders",
+        "write" => "v1/create_order",
+        _ => "v1/cancel_on_disconnect",
     };
-    let path = format!("/{}/v1/{route}", if lite { "lite" } else { "full" });
+    let path = format!("/{}/{method}", if lite { "lite" } else { "full" });
     // Gateway calls as (URL, body with full names); in lite, the keys that are not lite names.
     let requests: Arc<Mutex<Vec<(String, Value)>>> = Arc::default();
     let lite_errors: Arc<Mutex<Vec<String>>> = Arc::default();
@@ -226,11 +203,13 @@ async fn run_call(sc: &Value, encoding: Encoding) {
         .encoding(encoding)
         .http(http.clone())
         .on_event(move |e| ev.lock().unwrap().push(e.clone()))
-        .api_key("test-key")
         .signer(PrivateKeySigner::new(TEST_KEY).unwrap());
+    if call["api_key"] != false {
+        cfg = cfg.api_key("test-key");
+    }
     if ws {
         cfg = cfg.order_transport(OrderTransport::Ws);
-        gw.with(|s| s.ignore_rpcs.insert("v1/create_order".into()));
+        gw.with(|s| s.ignore_rpcs.insert(method.into()));
     }
     if let Some(ms) = call["ws_request_timeout_ms"].as_u64() {
         cfg = cfg.ws_request_timeout(Duration::from_millis(ms));
@@ -241,6 +220,7 @@ async fn run_call(sc: &Value, encoding: Encoding) {
         InstrumentMeta {
             instrument_hash: "0x030501".into(),
             base_decimals: 9,
+            limits: [("tick_size".to_owned(), "0.1".to_owned())].into(),
             ..Default::default()
         },
     );
@@ -249,25 +229,30 @@ async fn run_call(sc: &Value, encoding: Encoding) {
     let client_order_id = call["client_order_id"].as_str().map(|id| id.parse::<u64>().unwrap());
     let kind = call["kind"].as_str().unwrap().to_owned();
     let seconds = call["seconds"].as_f64().unwrap_or(0.0) as u16;
+    let off_tick = call["off_tick"] == true;
     let task = tokio::spawn(async move {
         match kind.as_str() {
             "read" => c.ticker().instrument("BTC_USDT_Perp").await.map(|_| ()),
             "countdown" => grvt::refresh_cancel_countdown(&c, 123, seconds).await.map(|_| ()),
-            _ => c.create_order().order(order(client_order_id)).await.map(|_| ()),
+            _ if bulk => c
+                .bulk_orders()
+                .sub_account_id(8289849667772468)
+                .orders(vec![order(None, false), order(None, false)])
+                .await
+                .map(|_| ()),
+            _ => c
+                .create_order()
+                .order(order(client_order_id, off_tick))
+                .await
+                .map(|_| ()),
         }
     });
     let sent_ws = |gw: &FakeGateway| -> Vec<Value> {
-        gw.with(|s| {
-            s.received
-                .iter()
-                .filter(|r| r["method"] == "v1/create_order")
-                .cloned()
-                .collect()
-        })
+        gw.with(|s| s.received.iter().filter(|r| r["method"] == method).cloned().collect())
     };
     if ws {
         let reply = script.lock().unwrap().next();
-        wait_until("write sent", || gw.calls("v1/create_order") == 1).await;
+        wait_until("write sent", || gw.calls(method) == 1).await;
         if reply["drop"] == true {
             gw.drop_all();
         } else if !reply["error"].is_null() {
@@ -277,7 +262,11 @@ async fn run_call(sc: &Value, encoding: Encoding) {
     }
     let result = task.await.unwrap();
 
-    assert_eq!(outcome(&result), want["outcome"], "{result:?}");
+    assert_eq!(
+        outcome(&result, call["kind"].as_str().unwrap()),
+        want["outcome"],
+        "{result:?}"
+    );
     match &result {
         Err(Error::Api {
             code,
@@ -314,6 +303,25 @@ async fn run_call(sc: &Value, encoding: Encoding) {
             .count();
         assert_eq!(retries as u64, n, "retry events");
     }
+    if let Some(wanted) = want["events"].as_array() {
+        // Each event as the scenario names it, with only the fields an expectation may list.
+        let got: Vec<Value> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e.kind() != EventKind::Frame)
+            .map(|e| match e {
+                Event::Retry { rpc, attempt, .. } => json!({"kind": "retry", "rpc": rpc, "attempt": attempt}),
+                e => json!({ "kind": snake(&format!("{:?}", e.kind())) }),
+            })
+            .collect();
+        assert_eq!(got.len(), wanted.len(), "events {got:?}");
+        for (g, w) in got.iter().zip(wanted) {
+            for (k, v) in w.as_object().unwrap() {
+                assert_eq!(&g[k], v, "event {k} in {g}");
+            }
+        }
+    }
     if let (Err(Error::Transport { sent, .. }), Some(want_sent)) = (&result, want["sent"].as_bool()) {
         assert_eq!(*sent, want_sent);
     }
@@ -336,24 +344,30 @@ async fn run_call(sc: &Value, encoding: Encoding) {
     if let Some(n) = want["attempts"].as_u64() {
         assert_eq!(sent.len() as u64, n, "attempts");
     }
+    // The client order IDs of each sent request's orders, in order.
+    let sent_ids = |body: &Value| -> Vec<Value> {
+        let orders = if bulk {
+            body["orders"].as_array().unwrap().clone()
+        } else {
+            vec![body["order"].clone()]
+        };
+        orders
+            .iter()
+            .map(|o| o["metadata"]["client_order_id"].clone())
+            .collect()
+    };
     if let Err(Error::OrderStateUnknown { client_order_ids, .. }) = &result {
         let got: Vec<Value> = client_order_ids.iter().map(|id| json!(id.to_string())).collect();
-        assert_eq!(
-            got,
-            [sent.last().unwrap()["order"]["metadata"]["client_order_id"].clone()],
-            "reported vs sent client order id"
-        );
+        assert_eq!(got, sent_ids(sent.last().unwrap()), "reported vs sent client order ids");
     }
     match want["sent_client_order_id"].as_str() {
         Some("generated") => {
-            let id: u64 = sent[0]["order"]["metadata"]["client_order_id"]
-                .as_str()
-                .unwrap()
-                .parse()
-                .unwrap();
-            assert!(id >= 1 << 63, "generated client order id {id} is under 2^63");
+            for id in sent_ids(&sent[0]) {
+                let id: u64 = id.as_str().unwrap().parse().unwrap();
+                assert!(id >= 1 << 63, "generated client order id {id} is under 2^63");
+            }
         }
-        Some(id) => assert_eq!(sent[0]["order"]["metadata"]["client_order_id"], id),
+        Some(id) => assert_eq!(sent_ids(&sent[0]), [id]),
         None => {}
     }
     if lite {
@@ -475,6 +489,9 @@ async fn run_stream(sc: &Value, encoding: Encoding) {
     if let Some(ms) = call["resync_timeout_ms"].as_u64() {
         cfg = cfg.resync_timeout(Duration::from_millis(ms));
     }
+    if let Some(ms) = call["idle_timeout_ms"].as_u64() {
+        cfg = cfg.idle_timeout(Duration::from_millis(ms));
+    }
     if let Some(n) = call["queue_size"].as_u64() {
         cfg = cfg.queue_size(n as usize);
     }
@@ -510,6 +527,10 @@ async fn run_stream(sc: &Value, encoding: Encoding) {
             }
         } else if step["drop"] == true {
             gw.drop_all();
+        } else if step["silence"] == true {
+            gw.silence_all();
+        } else if let Some(ms) = step["sleep_ms"].as_u64() {
+            tokio::time::sleep(Duration::from_millis(ms)).await;
         } else if let Some(n) = step["ignore_subscribes"].as_u64() {
             gw.with(|s| s.ignore_subscribes = n as usize);
         } else if let Some(n) = step["ack_latest"].as_u64() {

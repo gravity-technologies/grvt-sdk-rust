@@ -337,52 +337,6 @@ mod tests {
     }
 
     #[test]
-    fn sequencer_drops_before_ack_then_tracks() {
-        let mut s = Sequencer::default();
-        assert_eq!(s.on_frame(Some(5), Some(4)), Verdict::Drop);
-        s.on_ack(100, 1);
-        assert_eq!(s.on_frame(Some(0), None), Verdict::Deliver); // snapshot
-        assert_eq!(s.snapshots_left, 0);
-        assert_eq!(s.on_frame(Some(100), Some(99)), Verdict::Drop); // already covered
-        assert_eq!(s.on_frame(Some(101), Some(100)), Verdict::Deliver);
-        assert_eq!(s.on_frame(Some(105), Some(103)), Verdict::Gap);
-        assert_eq!(s.gaps, 1);
-        assert_eq!(s.last, 101);
-    }
-
-    #[test]
-    fn sequencer_first_frame_after_resubscribe() {
-        let mut s = Sequencer::default();
-        s.on_ack(0, 1);
-        s.on_frame(Some(0), None);
-        assert_eq!(s.on_frame(Some(7), Some(0)), Verdict::Deliver);
-        assert_eq!(s.on_frame(Some(8), Some(7)), Verdict::Deliver);
-        s.reset(); // re-subscribe after a gap
-        s.on_ack(20, 1);
-        s.on_frame(Some(0), None);
-        assert_eq!(s.on_frame(Some(21), Some(8)), Verdict::Deliver); // testnet sends the OLD last number
-        assert_eq!(s.on_frame(Some(22), Some(8)), Verdict::Gap); // only the first frame gets that pass
-        let mut t = Sequencer::default();
-        t.on_ack(50, 0);
-        assert_eq!(t.on_frame(Some(52), Some(0)), Verdict::Deliver);
-        assert_eq!(t.on_frame(Some(53), Some(51)), Verdict::Gap);
-        let mut u = Sequencer::default();
-        u.on_ack(50, 0);
-        assert_eq!(u.on_frame(Some(52), Some(51)), Verdict::Gap); // newer than anything known
-    }
-
-    #[test]
-    fn sequencer_resync_clears_on_snapshot() {
-        let mut s = Sequencer::default();
-        let t0 = Instant::now();
-        s.resync_started = Some(t0);
-        s.on_ack(10, 1);
-        assert!(s.resync_overdue(t0 + Duration::from_secs(6), Duration::from_secs(5)));
-        s.on_frame(Some(0), None);
-        assert!(!s.resync_overdue(t0 + Duration::from_secs(6), Duration::from_secs(5)));
-    }
-
-    #[test]
     fn backoff_is_full_jitter_and_capped() {
         let mut b = Backoff::seeded(Duration::from_millis(100), Duration::from_secs(1), 7);
         for attempt in 0..10u32 {

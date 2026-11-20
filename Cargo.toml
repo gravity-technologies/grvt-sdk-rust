@@ -6,7 +6,7 @@ rust-version = "1.88"
 description = "Grvt SDK (preview): REST, WebSocket streams, WebSocket order entry, EIP-712 signing"
 license = "MIT"
 publish = ["crates-io"]
-# An explicit list, because src/generated and CHANGELOG.md are git-ignored build output (`make sdk-gen`) and
+# An explicit list, because src/generated and CHANGELOG.md are git-ignored build output (`make sdk-gen-rust`) and
 # cargo leaves git-ignored files out otherwise. Tests and benches read the shared contract and scenarios, outside
 # the crate (tests/shared), so they stay out.
 include = ["src/**/*.rs", "examples/**/*.rs", "Cargo.toml", "README.md", "RUNTIME_API.md", "CHANGELOG.md", "LICENSE"]

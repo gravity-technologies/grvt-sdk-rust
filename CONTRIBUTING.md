@@ -134,5 +134,5 @@ Last recorded results:
   continuity.
 - **Client order IDs use the wall clock** (`TimeCounterClientOrderId`), not the configured `Clock`.
 - **Authentication belongs to the session runtime.** Raw edge login routes are not generated client methods.
-- **Not bound in the contract yet**: algo orders and session keys, so they can't be signed.
-- **Private-stream resume** waits for server support; callers backfill over REST.
+- **What users can't do yet** (private-stream resume, wallet login, a blocking client) is listed in
+  [Not supported yet](https://developers.grvt.io/sdks/rust#not-supported-yet); keep it there.

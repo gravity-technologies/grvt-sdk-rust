@@ -1,7 +1,8 @@
 //! User hooks.
 //!
 //! - `before_send(&mut Call)` runs before signing for every RPC (REST or WS). It may change
-//!   `call.params`. It runs before signing, so nothing can change a request after it is signed.
+//!   `call.params`, but must not add, remove or reorder orders, or change their client order IDs (that is an `Error::Config` and
+//!   nothing is sent). It runs before signing, so nothing can change a request after it is signed.
 //! - `on_event(&Event)` is a read-only listener for connection, stream and retry events. It must not
 //!   block: it runs on the socket's read task.
 //!

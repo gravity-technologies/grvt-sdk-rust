@@ -20,7 +20,8 @@ async fn testnet_market_data() {
     }
     let events: Arc<Mutex<Vec<EventKind>>> = Arc::default();
     let ev = events.clone();
-    let client = Grvt::new(Config::testnet().on_event(move |e| {
+    // Full, because the raw WS request below sends full field names; lite is the default (and the next test).
+    let client = Grvt::new(Config::testnet().encoding(Encoding::Full).on_event(move |e| {
         if e.kind() != EventKind::Frame {
             ev.lock().unwrap().push(e.kind());
         }
@@ -128,7 +129,7 @@ async fn testnet_lite_matches_full() {
         .unwrap();
         (client, sizes, events)
     };
-    let (full, full_sizes, _) = connect(Encoding::Full);
+    let (full, full_sizes, full_events) = connect(Encoding::Full);
     let (lite, lite_sizes, lite_events) = connect(Encoding::Lite);
 
     // HTTP
@@ -151,8 +152,10 @@ async fn testnet_lite_matches_full() {
     let over_ws: m::ApiGetInstrumentResponse = Encoding::Lite.from_slice(raw.as_bytes()).unwrap();
     assert_eq!(over_ws, inst);
 
-    // Order book snapshots, both subscribed at once: frames with the same global sequence number carry the
-    // same book.
+    // Order book snapshots, both subscribed at once. Testnet numbers each subscription's frames from its own
+    // start (two subscriptions opened together differ by a constant offset), so the sequence numbers can't
+    // pair them up. A book frame's event time can: the two frames for the same moment carry the same book,
+    // and each client's own frames must follow on without a gap.
     fn subscribe(client: &Grvt) -> grvt::runtime::StreamCall<'_, m::WSOrderbookLevelsFeedDataV1, impl Sized> {
         client
             .orderbook_snap_stream()
@@ -163,34 +166,43 @@ async fn testnet_lite_matches_full() {
     let (a, b) = tokio::join!(subscribe(&full).into_future(), subscribe(&lite).into_future());
     let read = |mut book: grvt::Subscription<m::WSOrderbookLevelsFeedDataV1>| async move {
         let mut got = Vec::new();
-        while got.len() < 8 {
+        while got.len() < 12 {
             let f = tokio::time::timeout(Duration::from_secs(20), book.next())
                 .await
                 .unwrap()
                 .unwrap()
                 .unwrap();
+            assert_eq!(f.stream, "v1.book.s");
+            assert_eq!(f.feed.instrument, "BTC_USDT_Perp");
+            assert!(
+                !f.feed.bids.clone().unwrap_or_default().is_empty(),
+                "frame not decoded: {f:?}"
+            );
             got.push(f);
         }
         got
     };
     let (a, b) = tokio::join!(read(a.unwrap()), read(b.unwrap()));
-    let frames = [a, b];
-    let same: Vec<_> = frames[0]
+    let same: Vec<_> = a
         .iter()
         .filter_map(|f| {
-            frames[1]
-                .iter()
-                .find(|l| l.sequence_number == f.sequence_number && l.sequence_number != 0)
+            b.iter()
+                .find(|l| l.feed.event_time == f.feed.event_time)
                 .map(|l| (f, l))
         })
         .collect();
-    assert!(!same.is_empty(), "no frame seen by both clients");
+    assert!(!same.is_empty(), "no book snapshot seen by both clients");
     for (f, l) in &same {
-        assert_eq!(f, l, "frame {}", f.sequence_number);
+        assert_eq!(f.feed, l.feed, "book at {:?}", f.feed.event_time);
     }
-    assert!(frames[1]
-        .iter()
-        .all(|f| !f.feed.bids.clone().unwrap_or_default().is_empty()));
+    assert!(
+        !full_events.lock().unwrap().contains(&EventKind::Gap),
+        "gap on the full book stream"
+    );
+    assert!(
+        !lite_events.lock().unwrap().contains(&EventKind::Gap),
+        "gap on the lite book stream"
+    );
 
     // Ticker deltas (frames carry keys the contract does not list)
     let mut ticks = lite
@@ -219,7 +231,7 @@ async fn testnet_lite_matches_full() {
         big.iter().copied().sum::<usize>() / big.len().max(1)
     };
     println!(
-        "\n  {instruments} instruments equal; {} book frames with the same sequence number equal; \
+        "\n  {instruments} instruments equal; {} book snapshots with the same event time equal; \
          avg book-sized frame {} B full vs {} B lite",
         same.len(),
         avg(&full_sizes),

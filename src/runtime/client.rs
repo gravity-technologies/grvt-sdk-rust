@@ -68,7 +68,10 @@ pub struct Config {
     pub ws_request_timeout: Duration,
     /// Wait for a fresh snapshot after a gap re-subscribe; past it the socket reconnects.
     pub resync_timeout: Duration,
-    /// Per-subscription queue bound.
+    /// No frame at all, not even a ping or pong, for this long: the WebSocket connection is dropped and
+    /// reconnected. The client pings every third of it.
+    pub idle_timeout: Duration,
+    /// Bound on each subscription's queue.
     pub queue_size: usize,
 }
 
@@ -91,6 +94,7 @@ impl Config {
             call_timeout: behavior::CALL_TIMEOUT,
             ws_request_timeout: behavior::WS_REQUEST_TIMEOUT,
             resync_timeout: behavior::RESYNC_TIMEOUT,
+            idle_timeout: behavior::WS_IDLE_TIMEOUT,
             queue_size: behavior::QUEUE_SIZE,
         }
     }
@@ -185,10 +189,25 @@ impl Config {
             || self.http_attempt_timeout.is_zero()
             || self.ws_request_timeout.is_zero()
             || self.resync_timeout.is_zero()
+            || self.idle_timeout.is_zero()
         {
             return Err(Error::Config(
-                "call, HTTP attempt, WS reply and resync timeouts must be positive".into(),
+                "call, HTTP attempt, WS reply, resync and idle timeouts must be positive".into(),
             ));
+        }
+        // The client pings every third of the idle timeout, and the idle check runs once per watchdog
+        // tick, so a shorter timeout can't be honoured (and a third of a few nanoseconds is zero).
+        if self.idle_timeout < behavior::WATCHDOG_INTERVAL {
+            return Err(Error::Config(format!(
+                "idle timeout must be at least {:?}",
+                behavior::WATCHDOG_INTERVAL
+            )));
+        }
+        if self.queue_size < behavior::QUEUE_SIZE_MIN {
+            return Err(Error::Config(format!(
+                "queue size must be at least {}",
+                behavior::QUEUE_SIZE_MIN
+            )));
         }
         Ok(())
     }
@@ -213,6 +232,14 @@ impl Config {
     /// Bound the wait for a fresh snapshot after a gap re-subscribe before reconnecting (default 5 seconds).
     pub fn resync_timeout(mut self, d: Duration) -> Self {
         self.resync_timeout = d;
+        self
+    }
+
+    /// Drop and reconnect a WebSocket connection that receives no frame at all, not even a ping or pong,
+    /// for this long (default 30 seconds). The client pings every third of it. Must be at least
+    /// `behavior::WATCHDOG_INTERVAL`.
+    pub fn idle_timeout(mut self, d: Duration) -> Self {
+        self.idle_timeout = d;
         self
     }
 
@@ -381,6 +408,7 @@ impl Runtime {
                     max_frame_bytes: env.ws_max_frame_bytes,
                     request_timeout: config.ws_request_timeout,
                     resync_timeout: config.resync_timeout,
+                    idle_timeout: config.idle_timeout,
                     encoding,
                 },
             )
@@ -545,7 +573,7 @@ impl Runtime {
             sub_account_id: self.sub_account_id(),
             client_order_ids: Some(&*self.0.client_order_ids),
         };
-        prepare_request(spec, &mut req, &defaults)?;
+        let client_order_ids = prepare_request(spec, &mut req, &defaults)?;
         let via = if spec.order_entry && self.0.order_transport == OrderTransport::Ws {
             Via::Ws
         } else {
@@ -561,6 +589,14 @@ impl Runtime {
             hook(&mut call);
             req = serde_json::from_value(call.params)
                 .map_err(|e| Error::Config(format!("before_send changed the request into something invalid: {e}")))?;
+            // The IDs are how an unknown outcome is looked up, so they must be the ones the caller knows.
+            // An id the hook removed is filled again with a new one, which fails here too.
+            if req.fill_client_order_ids(&*self.0.client_order_ids) != client_order_ids {
+                return Err(Error::Config(format!(
+                    "{}: before_send must not add, remove or reorder orders, or change their client order IDs",
+                    spec.method
+                )));
+            }
         }
         if Instant::now() >= deadline {
             return Err(Error::transport(
@@ -573,20 +609,8 @@ impl Runtime {
             req = self.sign(req, sign).await?; // nothing may change the request after this line
         }
         let body = serde_json::to_vec(&req).map_err(|e| Error::Config(format!("cannot encode request: {e}")))?;
-        let final_request: serde_json::Value =
-            serde_json::from_slice(&body).map_err(|e| Error::Config(e.to_string()))?;
-        let orders: Vec<&serde_json::Value> = final_request
-            .get("orders")
-            .and_then(|v| v.as_array())
-            .map(|v| v.iter().collect())
-            .unwrap_or_else(|| final_request.get("order").into_iter().collect());
-        let client_order_ids: Vec<u64> = orders
-            .into_iter()
-            .filter_map(|o| o.pointer("/metadata/client_order_id"))
-            .filter_map(|id| id.as_u64().or_else(|| id.as_str()?.parse().ok()))
-            .collect();
         let refresh = (!spec.refresh_metadata_on.is_empty()).then(|| body.clone());
-        // The ids and stale instruments above are read from the full JSON; the wire gets this call's encoding.
+        // Stale instruments are read from the full JSON; the wire gets this call's encoding.
         let encoding = spec.encoding(self.0.encoding);
         let body = match encoding {
             Encoding::Full => body,
@@ -798,16 +822,24 @@ impl Runtime {
     }
 }
 
+/// How long the renewal loop waits before its next login: until the renewal is due, but at least `floor`.
+/// The floor is `SESSION_RENEW_MIN_WAIT`, or the retry delay after a failed login, so a failure waits the retry
+/// delay once instead of the retry delay and then the floor again.
+pub(crate) fn renewal_wait(refresh_due: f64, now: f64, floor: Duration) -> Duration {
+    Duration::from_secs_f64((refresh_due - now).max(floor.as_secs_f64()))
+}
+
 async fn rotate_forever(session: Arc<Session>, hooks: Hooks, retry_delay: Duration) {
+    let mut floor = behavior::SESSION_RENEW_MIN_WAIT;
     loop {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0);
-        let wait = (session.snapshot().refresh_due() - now).max(1.0);
-        tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+        tokio::time::sleep(renewal_wait(session.snapshot().refresh_due(), now, floor)).await;
         match session.login().await {
             Ok(()) => {
+                floor = behavior::SESSION_RENEW_MIN_WAIT;
                 let s = session.snapshot();
                 hooks.emit(|| Event::SessionRotated {
                     websocket_reconnect_required: true,
@@ -822,7 +854,7 @@ async fn rotate_forever(session: Arc<Session>, hooks: Hooks, retry_delay: Durati
                     fatal: false,
                     error: format!("session: {e}"),
                 });
-                tokio::time::sleep(retry_delay).await;
+                floor = retry_delay;
             }
         }
     }
@@ -913,7 +945,6 @@ pub struct StreamCall<'a, F, Sel> {
     pub(crate) primary: Vec<Option<String>>,
     pub(crate) secondary: Vec<Option<String>>,
     required: &'static [(usize, &'static str)],
-    queue_size: Option<usize>,
     _p: PhantomData<fn() -> (F, Sel)>,
 }
 
@@ -932,7 +963,6 @@ impl<'a, F, Sel> StreamCall<'a, F, Sel> {
             primary: vec![None; primary],
             secondary: vec![None; secondary],
             required,
-            queue_size: None,
             _p: PhantomData,
         }
     }
@@ -944,12 +974,6 @@ impl<'a, F, Sel> StreamCall<'a, F, Sel> {
 
     pub fn spec(&self) -> &'static StreamSpec {
         self.spec
-    }
-
-    /// Override the client's per-subscription queue bound.
-    pub fn with_queue_size(mut self, n: usize) -> Self {
-        self.queue_size = Some(n);
-        self
     }
 }
 
@@ -968,7 +992,7 @@ where
             .find(|(i, _)| self.primary.get(*i).is_none_or(Option::is_none))
             .map(|(_, n)| *n);
         let selector = self.selector();
-        let cap = self.queue_size.unwrap_or(self.rt.0.queue_size);
+        let cap = self.rt.0.queue_size;
         let rt = self.rt;
         let spec = self.spec;
         Box::pin(async move {

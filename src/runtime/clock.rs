@@ -135,19 +135,15 @@ impl ClientOrderIdProvider for TimeCounterClientOrderId {
 mod tests {
     use super::*;
 
+    // The range and layout are checked by the shared scenarios and behavior_test.rs; this checks the counter
+    // starts where it is told and wraps within its bits.
     #[test]
-    fn client_order_id_counter_wraps_inside_the_api_client_range() {
+    fn client_order_id_counter_wraps_within_its_bits() {
         for start in [0x7FFF_FFFF, u32::MAX] {
             let ids = TimeCounterClientOrderId::starting_at(start);
             let (a, b) = (ids.next_id(), ids.next_id());
-            assert!(a >= 1 << 63 && b >= 1 << 63 && a != b, "{a} {b}");
-            assert_eq!(b & 0x7FFF_FFFF, (a + 1) & 0x7FFF_FFFF);
+            assert_eq!(a & 0x7FFF_FFFF, 0x7FFF_FFFF);
+            assert_eq!(b & 0x7FFF_FFFF, 0);
         }
-    }
-
-    #[test]
-    fn client_order_id_counter_starts_anywhere_in_31_bits() {
-        let ids = TimeCounterClientOrderId::starting_at(0x7FFF_FFFF);
-        assert_eq!(ids.next_id() & 0x7FFF_FFFF, 0x7FFF_FFFF);
     }
 }
