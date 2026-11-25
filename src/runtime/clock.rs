@@ -2,7 +2,7 @@
 //! takes the first two, so tests can pin them.
 
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::generated::behavior;
@@ -101,12 +101,15 @@ impl NonceProvider for RandomNonce {
     }
 }
 
-/// `1 << 63 | seconds << 31 | counter`: unique per process, sortable, and in the API client range
-/// [2^63, 2^64). The counter starts at a random 31-bit value, so separate processes rarely collide.
+/// Generates IDs from the Unix second and a randomly seeded 31-bit counter.
+/// By default, all clients in the process share one instance.
 #[derive(Debug)]
 pub struct TimeCounterClientOrderId {
     counter: AtomicU32,
 }
+
+pub(super) static DEFAULT_CLIENT_ORDER_IDS: LazyLock<Arc<TimeCounterClientOrderId>> =
+    LazyLock::new(|| Arc::new(TimeCounterClientOrderId::default()));
 
 impl Default for TimeCounterClientOrderId {
     fn default() -> Self {

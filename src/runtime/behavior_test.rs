@@ -26,6 +26,26 @@ fn client_defaults() {
 
 #[cfg(feature = "client")]
 #[tokio::test]
+async fn clients_share_default_order_ids() {
+    use crate::{Config, Grvt};
+    use std::sync::Arc;
+
+    let a = Grvt::new(Config::testnet()).unwrap();
+    let b = Grvt::new(Config::testnet()).unwrap();
+    assert!(std::ptr::addr_eq(
+        a.runtime().client_order_ids(),
+        b.runtime().client_order_ids()
+    ));
+
+    let mut config = Config::testnet();
+    let custom: Arc<dyn ClientOrderIdProvider> = Arc::new(TimeCounterClientOrderId::default());
+    config.client_order_ids = Arc::clone(&custom);
+    let c = Grvt::new(config).unwrap();
+    assert!(std::ptr::addr_eq(c.runtime().client_order_ids(), custom.as_ref()));
+}
+
+#[cfg(feature = "client")]
+#[tokio::test]
 async fn session_and_read_retry_timings() {
     let rt = crate::Grvt::new(crate::runtime::Config::testnet()).unwrap();
     assert_eq!(

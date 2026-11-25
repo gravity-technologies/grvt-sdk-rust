@@ -68,13 +68,16 @@ impl OrderBook {
         self.bids.clear();
         self.asks.clear();
     }
+    fn matches_scope(&self, stream: &str, selector: &str) -> bool {
+        self.scope.as_ref().is_none_or(|(s, k)| s == stream && k == selector)
+    }
     /// A gap on `stream` / `selector`: a delta book invalidates itself if the gap is on its subscription
     /// (or it has seen no frame yet) and needs a fresh snapshot.
     pub fn on_gap(&mut self, stream: &str, selector: &str, gap: &GapRange) {
         if self.mode == BookMode::Snapshot {
             return;
         }
-        if self.scope.is_none() || self.scope.as_ref().is_some_and(|(s, k)| s == stream && k == selector) {
+        if self.matches_scope(stream, selector) {
             self.invalidate(Some(gap.clone()));
         }
     }
@@ -108,8 +111,7 @@ impl OrderBook {
                 gap: self.gap.clone(),
             });
         }
-        let scope = (frame.stream.clone(), frame.selector.clone());
-        if frame.feed.instrument != self.instrument || self.scope.as_ref().is_some_and(|s| s != &scope) {
+        if frame.feed.instrument != self.instrument || !self.matches_scope(&frame.stream, &frame.selector) {
             return Err(self.fail("wrong_stream", None));
         }
         if self.ready
@@ -160,7 +162,8 @@ impl OrderBook {
                 }
             }
         }
-        self.scope = Some(scope);
+        self.scope
+            .get_or_insert_with(|| (frame.stream.clone(), frame.selector.clone()));
         self.sequence = frame.sequence_number;
         self.time = frame.feed.event_time;
         self.ready = true;

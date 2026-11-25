@@ -18,7 +18,7 @@ use tokio::task::JoinHandle;
 use crate::generated::behavior;
 
 use super::auth::Session;
-use super::clock::{ClientOrderIdProvider, Clock, NonceProvider, RandomNonce, SystemClock, TimeCounterClientOrderId};
+use super::clock::{ClientOrderIdProvider, Clock, NonceProvider, RandomNonce, SystemClock, DEFAULT_CLIENT_ORDER_IDS};
 use super::codec;
 use super::env::Environment;
 use super::error::{Error, Result};
@@ -87,7 +87,7 @@ impl Config {
             check_orders: true,
             clock: Arc::new(SystemClock::new()),
             nonces: Arc::new(RandomNonce),
-            client_order_ids: Arc::new(TimeCounterClientOrderId::default()),
+            client_order_ids: DEFAULT_CLIENT_ORDER_IDS.clone(),
             http: None,
             hooks: Hooks::default(),
             http_attempt_timeout: behavior::HTTP_ATTEMPT_TIMEOUT,
@@ -103,11 +103,11 @@ impl Config {
         Config::new(Environment::testnet())
     }
 
-    pub fn prod() -> Config {
-        Config::new(Environment::prod())
+    pub fn production() -> Config {
+        Config::new(Environment::production())
     }
 
-    /// `"testnet"` or `"prod"`.
+    /// `"testnet"` or `"production"`.
     pub fn named(env: &str) -> Result<Config> {
         Environment::named(env).map(Config::new)
     }

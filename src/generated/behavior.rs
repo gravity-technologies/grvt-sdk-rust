@@ -76,7 +76,8 @@ pub const CLIENT_ORDER_ID_SECONDS_BITS: u32 = 32;
 /// (1 << CLIENT_ORDER_ID_SECONDS_BITS) - 1.
 pub const CLIENT_ORDER_ID_SECONDS_MASK: u64 = 0xFFFFFFFF;
 
-/// Width of the per-process counter in the low bits of a generated client order ID.
+/// Width of the counter shared by default clients of the same loaded SDK, in the low bits of a
+/// generated client order ID.
 pub const CLIENT_ORDER_ID_COUNTER_BITS: u32 = 31;
 
 /// (1 << CLIENT_ORDER_ID_COUNTER_BITS) - 1.

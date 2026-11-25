@@ -47,8 +47,10 @@ fn custom_environment_rejects_a_missing_url_or_chain_id() {
 }
 
 #[test]
-fn only_testnet_and_prod_are_named() {
+fn only_testnet_and_production_are_named() {
     let names: Vec<String> = Environment::all().into_iter().map(|e| e.name).collect();
-    assert_eq!(names, ["testnet", "prod"]);
+    assert_eq!(names, ["testnet", "production"]);
+    assert_eq!(Environment::named("production").unwrap(), Config::production().env);
+    assert!(Environment::named("prod").is_err());
     assert!(Environment::named("staging").is_err());
 }

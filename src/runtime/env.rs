@@ -1,6 +1,6 @@
 //! Where the SDK connects and which chain id it signs for.
 //!
-//! Use a named environment (`testnet`, `prod`) or build your own `Environment` (a local gateway, a
+//! Use a named environment (`testnet`, `production`) or build your own `Environment` (a local gateway, a
 //! test server).
 
 use super::error::{Error, Result};
@@ -27,38 +27,6 @@ pub struct Environment {
 }
 
 impl Environment {
-    fn hosted(name: &str, domain: &str, chain_id: u64) -> Environment {
-        Environment {
-            name: name.to_owned(),
-            md_url: format!("https://market-data.{domain}"),
-            td_url: format!("https://trades.{domain}"),
-            edge_url: format!("https://edge.{domain}"),
-            md_ws_url: format!("wss://market-data.{domain}/ws/full"),
-            td_ws_url: format!("wss://trades.{domain}/ws/full"),
-            chain_id,
-            ws_max_frame_bytes: None,
-        }
-    }
-
-    pub fn testnet() -> Environment {
-        Self::hosted("testnet", "testnet.grvt.io", 326)
-    }
-
-    pub fn prod() -> Environment {
-        Self::hosted("prod", "grvt.io", 325)
-    }
-
-    /// `"testnet"` or `"prod"`.
-    pub fn named(name: &str) -> Result<Environment> {
-        match name {
-            "testnet" => Ok(Self::testnet()),
-            "prod" => Ok(Self::prod()),
-            _ => Err(Error::Config(format!(
-                "unknown env {name:?}; use \"testnet\", \"prod\" or build an Environment"
-            ))),
-        }
-    }
-
     /// Reports a missing URL or chain id. Every field of a custom environment is used as given: nothing
     /// falls back to a named environment, so an empty URL or a zero `chain_id` is an error, not a default.
     /// `Grvt::new` calls it.
@@ -86,11 +54,6 @@ impl Environment {
             self.name,
             missing.join(", ")
         )))
-    }
-
-    /// Every environment the SDK knows by name.
-    pub fn all() -> Vec<Environment> {
-        vec![Self::testnet(), Self::prod()]
     }
 
     pub fn rest_url(&self, gateway: Gateway, path: &str) -> String {

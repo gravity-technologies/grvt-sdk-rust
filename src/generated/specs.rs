@@ -5,6 +5,49 @@
 
 use crate::runtime::{Gateway, RpcSpec, StreamSpec};
 
+type NamedEnvironment = (&'static str, fn() -> crate::runtime::Environment);
+
+impl crate::runtime::Environment {
+    pub fn testnet() -> Self {
+        Self {
+            name: "testnet".into(),
+            md_url: "https://market-data.testnet.grvt.io".into(),
+            td_url: "https://trades.testnet.grvt.io".into(),
+            edge_url: "https://edge.testnet.grvt.io".into(),
+            md_ws_url: "wss://market-data.testnet.grvt.io/ws/full".into(),
+            td_ws_url: "wss://trades.testnet.grvt.io/ws/full".into(),
+            chain_id: 326,
+            ws_max_frame_bytes: None,
+        }
+    }
+    pub fn production() -> Self {
+        Self {
+            name: "production".into(),
+            md_url: "https://market-data.grvt.io".into(),
+            td_url: "https://trades.grvt.io".into(),
+            edge_url: "https://edge.grvt.io".into(),
+            md_ws_url: "wss://market-data.grvt.io/ws/full".into(),
+            td_ws_url: "wss://trades.grvt.io/ws/full".into(),
+            chain_id: 325,
+            ws_max_frame_bytes: None,
+        }
+    }
+    const BUILTINS: &'static [NamedEnvironment] = &[
+        ("testnet", Self::testnet),
+        ("production", Self::production),
+    ];
+    pub fn named(name: &str) -> crate::Result<Self> {
+        if let Some((_, build)) = Self::BUILTINS.iter().find(|(key, _)| *key == name) {
+            return Ok(build());
+        }
+        Err(crate::Error::Config(format!("unknown env {name:?}; use \"testnet\", \"production\" or build an Environment")))
+    }
+    /// Every environment the SDK knows by name.
+    pub fn all() -> Vec<Self> {
+        Self::BUILTINS.iter().map(|(_, build)| build()).collect()
+    }
+}
+
 // Edge (login) routes
 pub static EDGE_API_KEY_LOGIN: RpcSpec = RpcSpec { method: "auth/api_key/login", gateway: Gateway::Edge, path: "/auth/api_key/login", lite_path: "", auth: false, write: false, order_entry: false, refresh_metadata_on: &[] };
 pub static EDGE_WALLET_LOGIN: RpcSpec = RpcSpec { method: "auth/wallet/login", gateway: Gateway::Edge, path: "/auth/wallet/login", lite_path: "", auth: false, write: false, order_entry: false, refresh_metadata_on: &[] };

@@ -21,13 +21,12 @@
 //! encoding, so `ws_response` and `decode_feed` need no argument.
 
 use std::borrow::Cow;
-use std::sync::LazyLock;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
-use super::clock::{ClientOrderIdProvider, TimeCounterClientOrderId};
+use super::clock::{ClientOrderIdProvider, DEFAULT_CLIENT_ORDER_IDS};
 use super::codec::{opt_cow_str, opt_num, opt_u64, ErrorBody, LiteErrorBody, LiteSubscribeResult, SubscribeResult};
 use super::env::Environment;
 use super::error::{Error, ErrorTable, Result};
@@ -74,6 +73,13 @@ pub struct RequestDefaults<'a> {
     pub client_order_ids: Option<&'a dyn ClientOrderIdProvider>,
 }
 
+impl RequestDefaults<'_> {
+    fn order_ids(&self) -> &dyn ClientOrderIdProvider {
+        self.client_order_ids
+            .unwrap_or_else(|| DEFAULT_CLIENT_ORDER_IDS.as_ref())
+    }
+}
+
 impl std::fmt::Debug for RequestDefaults<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RequestDefaults")
@@ -87,12 +93,11 @@ impl std::fmt::Debug for RequestDefaults<'_> {
 /// order ids (one per order; empty for requests that carry no order): keep them, `transport_failure` needs
 /// them if the answer is lost.
 pub fn prepare_request<R: Request>(spec: &RpcSpec, req: &mut R, defaults: &RequestDefaults<'_>) -> Result<Vec<u64>> {
-    static IDS: LazyLock<TimeCounterClientOrderId> = LazyLock::new(TimeCounterClientOrderId::default);
     req.default_account(defaults.sub_account_id);
     if let Some(field) = req.missing_field() {
         return Err(Error::Config(format!("{}: {field} is required", spec.method)));
     }
-    Ok(req.fill_client_order_ids(defaults.client_order_ids.unwrap_or(&*IDS)))
+    Ok(req.fill_client_order_ids(defaults.order_ids()))
 }
 
 /// An `Api` or `RateLimit` error for a server error code, classified by the contract's error table.
@@ -739,6 +744,16 @@ impl<'a> WsMessage<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn request_and_client_share_default_order_ids() {
+        let config = crate::Config::testnet();
+        assert!(std::ptr::addr_eq(
+            RequestDefaults::default().order_ids(),
+            config.client_order_ids.as_ref()
+        ));
+    }
 
     #[test]
     fn parses_replies_feeds_and_errors_once() {
