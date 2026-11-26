@@ -2346,7 +2346,7 @@ pub struct ApiSfpTradingScheduleResponse {
     /// Legacy: use 'schedules' instead. Schedule for the 'COMMODITY_CME' asset class
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commodity_cme: Option<SfpMarketSchedule>,
-    /// Trading hours as groups of stable perps sharing them: one per asset class, named after it, then one per instrument schedule, named in cluster config. Each...
+    /// Trading hours as groups of stable perps sharing them: one per asset class, named after it, then one per instrument schedule, named in cluster config. A group...
     #[serde(deserialize_with = "c::required_nullable")]
     pub schedules: Option<Vec<SfpTradingScheduleGroup>>,
 }
@@ -4676,7 +4676,7 @@ impl SfpMarketSchedule {
 pub struct SfpTradingScheduleGroup {
     /// The group name. For stable perps on their asset class hours, the asset class (for example 'COMMODITY_CME')
     pub name: String,
-    /// The instruments' asset class. Its holiday calendar sets the group's holidays
+    /// The instruments' asset class. The group's holidays come from the stable perps' own holiday calendar when one lists them, else from the asset class's default...
     pub asset_class: e::AssetClass,
     /// The stable perps trading these hours, sorted. Each stable perp with a schedule is in exactly one group
     #[serde(deserialize_with = "c::required_nullable")]
